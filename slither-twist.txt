@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Slither-Style Snake with POV Effects & Special Food</title>
+  <style>
+    body {
+      margin: 0;
+      background: #050608;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      font-family: system-ui, sans-serif;
+      color: #fff;
+    }
+    #wrap {
+      position: relative;
+    }
+    canvas {
+      background: radial-gradient(circle at center, #1b1f2b 0, #050608 60%);
+      border: 2px solid #333;
+      display: block;
+    }
+    #hud {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      font-size: 14px;
+      text-shadow: 0 0 4px #000;
+      max-width: 420px;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <canvas id="game" width="900" height="600"></canvas>
+    <div id="hud">
+      <div id="info"></div>
+      <div style="margin-top:6px; opacity:0.8;">
+        Controls: Move mouse to steer, SPACE to boost<br/>
+        (All POV effects are triggered by eating special food)
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    const info = document.getElementById('info');
+
+    const WORLD_SIZE = 3500;
+    const SEG_DIST = 10;
+    const BASE_SPEED = 2.2;
+    const BOOST_SPEED = 4.0;
+    const TURN_SPEED = 0.08;
+    const INITIAL_LEN = 30;
+    const FOOD_COUNT = 200;
+
+    let mouseX = canvas.width / 2;
+    let mouseY = canvas.height / 2;
+    let angle = 0;
+    let targetAngle = 0;
+    let boosting = false;
+
+    const player = {
+      x: WORLD_SIZE / 2,
+      y: WORLD_SIZE / 2,
+      length: INITIAL_LEN,
+      energy: 1
+    };
+
+    let snake = [];
+    let food = [];
+    let score = 0;
+
+    // ===== FOOD TYPES & BEHAVIORS =====
+    const FOOD_TYPES = {
+      NORMAL: "normal",
+      SHAKE: "shake",
+      ZOOM: "zoom",
+      OFFSET: "offset",
+      FAKE_FOOD: "fake_food",
+      FOG: "fog"
+    };
+
+    const FOOD_BEHAVIORS = {
+      normal: {
+        color: () => `hsl(${Math.random()*360}, 80%, 60%)`,
+        radius: () => 4 + Math.random()*4,
+        onEat: () => {
+          player.length += 4;
+          score += 10;
+        }
+      },
+
+      shake: {
+        color: () => "#ff4444",
+        radius: () => 6,
+        onEat: () => {
+          addEffect("camera_shake", 1500, { intensity: 1.2 });
+        }
+      },
+
+      zoom: {
+        color: () => "#44ff44",
+        radius: () => 6,
+        onEat: () => {
+          addEffect("zoom_in", 2500, { amount: 0.6 });
+        }
+      },
+
+      offset: {
+        color: () => "#4488ff",
+        radius: () => 6,
+        onEat: () => {
+          addEffect("offset_center", 2500, { offsetX: 150 });
+        }
+      },
+
+      fake_food: {
+        color: () => "#ffffff",
+        radius: () => 5,
+        onEat: () => {
+          addEffect("fake_food", 5000, { count: 30 });
+        }
+      },
+
+      fog: {
+        color: () => "#8888ff",
+        radius: () => 7,
+        onEat: () => {
+          addEffect("fog_bubble", 4000, { radius: 250 });
+        }
+      }
+    };
+
+    // ===== EFFECT SYSTEM =====
+    const effects = [];
+
+    function addEffect(type, duration, data = {}) {
+      effects.push({
+        type,
+        duration,
+        data,
+        start: performance.now()
+      });
+    }
+
+    function cleanupEffects() {
+      const now = performance.now();
+      for (let i = effects.length - 1; i >= 0; i--) {
+        const e = effects[i];
+        if ((now - e.start) > e.duration) {
+          effects.splice(i, 1);
+        }
+      }
+    }
+
+    // Controls
+    window.addEventListener('keydown', (e) => {
+      if (e.code === 'Space') boosting = true;
+    });
+
+    window.addEventListener('keyup', (e) => {
+      if (e.code === 'Space') boosting = false;
+    });
+
+    canvas.addEventListener('mousemove', e => {
+      const r = canvas.getBoundingClientRect();
+      mouseX = e.clientX - r.left;
+      mouseY = e.clientY - r.top;
+    });
+
+    // Init snake and food
+    function initSnake() {
+      snake = [];
+      for (let i = 0; i < player.length; i++) {
+        snake.push({
+          x: player.x - i * SEG_DIST,
+          y: player.y
+        });
+      }
+    }
+
+    function weightedFoodType() {
+      const roll = Math.random();
+
+      if (roll < 0.82) return FOOD_TYPES.NORMAL;        // 82%
+      if (roll < 0.88) return FOOD_TYPES.SHAKE;         // +6%
+      if (roll < 0.93) return FOOD_TYPES.ZOOM;          // +5%
+      if (roll < 0.96) return FOOD_TYPES.OFFSET;        // +3%
+      if (roll < 0.98) return FOOD_TYPES.FAKE_FOOD;     // +2%
+      return FOOD_TYPES.FOG;                            // +2%
+    }
+
+    function spawnFood() {
+      food = [];
+
+      for (let i = 0; i < FOOD_COUNT; i++) {
+        const type = weightedFoodType();
+        const behavior = FOOD_BEHAVIORS[type];
+
+        food.push({
+          x: Math.random() * WORLD_SIZE,
+          y: Math.random() * WORLD_SIZE,
+          r: behavior.radius(),
+          color: behavior.color(),
+          type
+        });
+      }
+    }
+
+    // Logic
+    function updateAngle() {
+      const dx = mouseX - canvas.width / 2;
+      const dy = mouseY - canvas.height / 2;
+      targetAngle = Math.atan2(dy, dx);
+
+      let diff = targetAngle - angle;
+      diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+      angle += diff * TURN_SPEED;
+    }
+
+    function updatePlayer() {
+      const speed = boosting && player.energy > 0.1 ? BOOST_SPEED : BASE_SPEED;
+
+      if (boosting && player.energy > 0) {
+        player.energy -= 0.004;
+        player.energy = Math.max(0, player.energy);
+      } else {
+        player.energy += 0.002;
+        player.energy = Math.min(1, player.energy);
+      }
+
+      player.x += Math.cos(angle) * speed;
+      player.y += Math.sin(angle) * speed;
+
+      player.x = Math.max(0, Math.min(WORLD_SIZE, player.x));
+      player.y = Math.max(0, Math.min(WORLD_SIZE, player.y));
+    }
+
+    function updateSnake() {
+      snake[0].x = player.x;
+      snake[0].y = player.y;
+
+      for (let i = 1; i < snake.length; i++) {
+        const prev = snake[i - 1];
+        const seg = snake[i];
+        const dx = prev.x - seg.x;
+        const dy = prev.y - seg.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist > SEG_DIST) {
+          const t = (dist - SEG_DIST) / dist;
+          seg.x += dx * t;
+          seg.y += dy * t;
+        }
+      }
+
+      while (snake.length < player.length) {
+        const last = snake[snake.length - 1];
+        snake.push({ x: last.x, y: last.y });
+      }
+    }
+
+    function eatFood() {
+      for (let i = food.length - 1; i >= 0; i--) {
+        const f = food[i];
+        const dx = f.x - player.x;
+        const dy = f.y - player.y;
+        const dist = Math.hypot(dx, dy);
+
+        if (dist < f.r + 10) {
+          const behavior = FOOD_BEHAVIORS[f.type];
+          behavior.onEat();  // triggers POV effect or normal growth
+
+          food.splice(i, 1);
+
+          // respawn new food
+          const newType = weightedFoodType();
+          const newBehavior = FOOD_BEHAVIORS[newType];
+
+          food.push({
+            x: Math.random() * WORLD_SIZE,
+            y: Math.random() * WORLD_SIZE,
+            r: newBehavior.radius(),
+            color: newBehavior.color(),
+            type: newType
+          });
+        }
+      }
+    }
+
+    function selfCollision() {
+      const head = snake[0];
+      for (let i = 12; i < snake.length; i++) {
+        const seg = snake[i];
+        const dx = seg.x - head.x;
+        const dy = seg.y - head.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist < 8) {
+          resetGame();
+          break;
+        }
+      }
+    }
+
+    function resetGame() {
+      player.x = WORLD_SIZE / 2;
+      player.y = WORLD_SIZE / 2;
+      player.length = INITIAL_LEN;
+      player.energy = 1;
+      score = 0;
+      initSnake();
+      spawnFood();
+      effects.length = 0;
+    }
+
+    // Camera + effects
+    function getBaseCamera() {
+      return {
+        x: player.x - canvas.width / 2,
+        y: player.y - canvas.height / 2,
+        zoom: 1
+      };
+    }
+
+    function applyCameraEffects(cam) {
+      const now = performance.now();
+
+      for (const e of effects) {
+        const t = (now - e.start) / e.duration;
+        if (t >= 1) continue;
+
+        if (e.type === 'camera_shake') {
+          const intensity = (1 - t) * (e.data.intensity || 1);
+          cam.x += (Math.random() - 0.5) * 25 * intensity;
+          cam.y += (Math.random() - 0.5) * 25 * intensity;
+        }
+
+        if (e.type === 'zoom_in') {
+          const amount = e.data.amount || 0.5;
+          cam.zoom *= 1 + (1 - t) * amount;
+        }
+
+        if (e.type === 'offset_center') {
+          const off = e.data.offsetX || 100;
+          cam.x += off * (1 - t);
+        }
+      }
+
+      return cam;
+    }
+
+    function worldToScreen(x, y, cam) {
+      return {
+        x: (x - cam.x) * cam.zoom,
+        y: (y - cam.y) * cam.zoom
+      };
+    }
+
+    // Rendering
+    function drawGrid(cam) {
+      ctx.strokeStyle = '#202331';
+      ctx.lineWidth = 1;
+      const step = 90;
+
+      const offX = cam.x;
+      const offY = cam.y;
+
+      const startX = -(((offX) % step) * cam.zoom + step * cam.zoom);
+      const startY = -(((offY) % step) * cam.zoom + step * cam.zoom);
+
+      for (let x = startX; x < canvas.width + step * cam.zoom; x += step * cam.zoom) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, canvas.height);
+        ctx.stroke();
+      }
+      for (let y = startY; y < canvas.height + step * cam.zoom; y += step * cam.zoom) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(canvas.width, y);
+        ctx.stroke();
+      }
+    }
+
+    function drawFood(cam) {
+      for (const f of food) {
+        const p = worldToScreen(f.x, f.y, cam);
+
+        ctx.beginPath();
+        ctx.fillStyle = f.color;
+
+        if (f.type !== FOOD_TYPES.NORMAL) {
+          ctx.shadowColor = f.color;
+          ctx.shadowBlur = 15;
+        }
+
+        ctx.arc(p.x, p.y, f.r * cam.zoom, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.shadowBlur = 0;
+      }
+    }
+
+    // Fake food effect rendering
+    function drawFakeFood(cam) {
+      const now = performance.now();
+      for (const e of effects) {
+        if (e.type !== 'fake_food') continue;
+        const t = (now - e.start) / e.duration;
+        if (t >= 1) continue;
+
+        if (!e.data.spawned) {
+          e.data.spawned = true;
+          e.data.items = [];
+          const count = e.data.count || 20;
+          for (let i = 0; i < count; i++) {
+            e.data.items.push({
+              x: player.x + (Math.random() - 0.5) * 800,
+              y: player.y + (Math.random() - 0.5) * 800,
+              r: 4,
+              color: 'rgba(255,255,255,0.6)'
+            });
+          }
+        }
+
+        const alpha = 1 - t;
+        for (const f of e.data.items) {
+          const p = worldToScreen(f.x, f.y, cam);
+          ctx.beginPath();
+          ctx.fillStyle = `rgba(200,200,255,${0.4 * alpha})`;
+          ctx.arc(p.x, p.y, f.r * cam.zoom, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+
+    function drawSnake(cam) {
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+
+      for (let i = snake.length - 1; i > 0; i--) {
+        const seg = snake[i];
+        const p = worldToScreen(seg.x, seg.y, cam);
+        const t = i / snake.length;
+        const radius = (6 + t * 7) * cam.zoom;
+
+        ctx.beginPath();
+        ctx.fillStyle = `hsl(${(t * 220 + score) % 360}, 85%, 55%)`;
+        ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      const head = snake[0];
+      const hp = worldToScreen(head.x, head.y, cam);
+
+      ctx.beginPath();
+      ctx.fillStyle = '#fff';
+      ctx.arc(hp.x, hp.y, 11 * cam.zoom, 0, Math.PI * 2);
+      ctx.fill();
+
+      const eyeOffset = 0.5;
+      const eyeDist = 7 * cam.zoom;
+      const eyeR = 2.3 * cam.zoom;
+
+      const leftA = angle - eyeOffset;
+      const rightA = angle + eyeOffset;
+
+      const lx = hp.x + Math.cos(leftA) * eyeDist;
+      const ly = hp.y + Math.sin(leftA) * eyeDist;
+      const rx = hp.x + Math.cos(rightA) * eyeDist;
+      const ry = hp.y + Math.sin(rightA) * eyeDist;
+
+      ctx.fillStyle = '#000';
+      ctx.beginPath();
+      ctx.arc(lx, ly, eyeR, 0, Math.PI * 2);
+      ctx.arc(rx, ry, eyeR, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    function drawEnergyBar() {
+      const w = 150;
+      const h = 10;
+      const x = canvas.width - w - 20;
+      const y = 20;
+
+      ctx.fillStyle = '#111';
+      ctx.fillRect(x, y, w, h);
+      ctx.fillStyle = '#4fd1ff';
+      ctx.fillRect(x, y, w * player.energy, h);
+      ctx.strokeStyle = '#333';
+      ctx.strokeRect(x, y, w, h);
+    }
+
+    // Fog bubble effect
+    function drawFog(cam) {
+      const now = performance.now();
+      for (const e of effects) {
+        if (e.type !== 'fog_bubble') continue;
+        const t = (now - e.start) / e.duration;
+        if (t >= 1) continue;
+
+        const radius = (e.data.radius || 250) * cam.zoom;
+        const alpha = 0.8 * (1 - t * 0.7);
+
+        const center = worldToScreen(player.x, player.y, cam);
+
+        ctx.save();
+        ctx.fillStyle = `rgba(0,0,0,${alpha})`;
+        ctx.beginPath();
+        ctx.rect(0, 0, canvas.width, canvas.height);
+        ctx.arc(center.x, center.y, radius, 0, Math.PI * 2, true);
+        ctx.fill('evenodd');
+        ctx.restore();
+      }
+    }
+
+    function loop() {
+      updateAngle();
+      updatePlayer();
+      updateSnake();
+      eatFood();
+      selfCollision();
+      cleanupEffects();
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      let cam = getBaseCamera();
+      cam = applyCameraEffects(cam);
+
+      drawGrid(cam);
+      drawFood(cam);
+      drawFakeFood(cam);
+      drawSnake(cam);
+      drawFog(cam);
+      drawEnergyBar();
+
+      info.textContent = `Score: ${score} | Energy: ${(player.energy * 100).toFixed(0)}% | Active effects: ${effects.length}`;
+
+      requestAnimationFrame(loop);
+    }
+
+    // Start
+    initSnake();
+    spawnFood();
+    loop();
+  </script>
+</body>
+</html>
